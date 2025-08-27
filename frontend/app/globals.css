@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+  
+  body {
+    @apply bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 text-slate-800 min-h-screen;
+  }
+}
+
+@layer utilities {
+  .text-primary-100 {
+    @apply text-blue-100;
+  }
+  
+  .text-primary-500 {
+    @apply text-blue-500;
+  }
+  
+  .text-primary-600 {
+    @apply text-blue-600;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold py-3 px-6 rounded-xl transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5;
+  }
+  
+  .btn-secondary {
+    @apply bg-white hover:bg-slate-50 text-slate-700 font-medium py-2.5 px-5 rounded-xl transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2 border border-slate-200 shadow-sm hover:shadow-md;
+  }
+  
+  .card {
+    @apply bg-white/80 backdrop-blur-sm rounded-2xl shadow-xl border border-white/20 p-6;
+  }
+  
+  .input-field {
+    @apply w-full px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white/80 backdrop-blur-sm shadow-sm transition-all duration-200;
+  }
+  
+  .gradient-bg {
+    @apply bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50;
+  }
+  
+  .glass-card {
+    @apply bg-white/70 backdrop-blur-md rounded-2xl shadow-2xl border border-white/30;
+  }
+  
+  .shadow-glow {
+    @apply shadow-lg shadow-blue-500/25;
+  }
+  
+  .shadow-soft {
+    @apply shadow-md shadow-slate-500/10;
+  }
+}
