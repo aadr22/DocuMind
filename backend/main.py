@@ -36,13 +36,27 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configure CORS for frontend integration
+# Configure CORS for frontend integration with environment-based origins
+# Get allowed origins from environment variable, with secure defaults
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+if allowed_origins_env:
+    # Production: use comma-separated list from environment variable
+    allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+else:
+    # Development fallback: allow localhost only
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+logger.info(f"CORS configured with origins: {allowed_origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict this to your Vercel domain
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept"],
 )
 
 # Initialize services using dependency injection

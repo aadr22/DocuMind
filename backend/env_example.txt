@@ -9,5 +9,9 @@ FIREBASE_STORAGE_BUCKET=your-project-id.appspot.com
 HOST=0.0.0.0
 PORT=8000
 
-# Optional: CORS Configuration (restrict in production)
-ALLOWED_ORIGINS=https://your-vercel-domain.vercel.app
+# CORS Configuration (CRITICAL for production security)
+# Comma-separated list of allowed origins
+# Development: Leave empty to default to localhost:3000
+# Production: Set to your frontend domain(s)
+# Example: ALLOWED_ORIGINS=https://your-app.vercel.app,https://www.your-app.com
+ALLOWED_ORIGINS=
