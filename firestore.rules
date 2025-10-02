@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Users can only read and write their own user profile
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Users can only read and write their own sessions
+    match /sessions/{sessionId} {
+      allow read, write: if request.auth != null && request.auth.uid == sessionId;
+    }
+    
+    // Users can only read and write their own documents
+    match /documents/{documentId} {
+      allow read, write: if request.auth != null && 
+        request.auth.uid == resource.data.uid;
+      allow create: if request.auth != null && 
+        request.auth.uid == request.resource.data.uid;
+    }
+    
+    // Users can only read and write their own user activities
+    match /user_activities/{activityId} {
+      allow read, write: if request.auth != null && 
+        request.auth.uid == resource.data.uid;
+      allow create: if request.auth != null && 
+        request.auth.uid == request.resource.data.uid;
+    }
+    
+    // Public documents (if any) can be read by anyone
+    match /public_documents/{documentId} {
+      allow read: if true;
+      allow write: if request.auth != null && 
+        request.auth.uid == resource.data.uid;
+    }
+    
+    // Admin users can read all documents (for moderation purposes)
+    match /{document=**} {
+      allow read: if request.auth != null && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+  }
+}

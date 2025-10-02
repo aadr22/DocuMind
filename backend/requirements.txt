@@ -11,27 +11,30 @@ openai==1.3.7
 # Image processing (using alternatives that work on Windows)
 pillow==10.1.0
 numpy==1.24.3
-opencv-python==4.8.1.78
+opencv-python==4.6.0.66
 
 # PDF processing
 PyPDF2==3.0.1
+pdfplumber==0.10.3
 
-# Enhanced Vision Models
-paddlepaddle==2.5.2
-paddleocr==2.7.0.3
-pytesseract==0.3.10
+# Enhanced Vision Models (simplified for Windows compatibility)
+# paddlepaddle==2.6.2
+# paddleocr==2.7.0.3
+# pytesseract==0.3.10
 
 # Data validation
 pydantic==2.5.0
 
 # Firebase integration
 firebase-admin==6.2.0
+google-cloud-storage==2.10.0
 
 # Production server
 gunicorn==21.2.0
 
 # HTTP requests
 requests==2.31.0
+httpx==0.25.2
 
 # Alternative OCR solution that works on Windows
 easyocr

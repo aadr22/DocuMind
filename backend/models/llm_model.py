@@ -13,8 +13,8 @@ class LLMProcessor:
         if not api_key:
             raise ValueError("OPENAI_API_KEY not found in environment variables")
         
-        # Configure OpenAI for version 0.28.1
-        openai.api_key = api_key
+        # Configure OpenAI client for version 1.3.7
+        self.client = openai.OpenAI(api_key=api_key)
         self.model = "gpt-4o-mini"
     
     def summarize_text(self, text: str, max_length: int = 500) -> str:
@@ -37,7 +37,7 @@ class LLMProcessor:
             Summary:
             """
             
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that creates concise, accurate summaries of documents."},
@@ -79,7 +79,7 @@ class LLMProcessor:
             Answer:
             """
             
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that answers questions based on document content. Be accurate and concise."},
@@ -120,7 +120,7 @@ class LLMProcessor:
             Analysis:
             """
             
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a document analysis expert. Provide structured, insightful analysis."},

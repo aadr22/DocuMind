@@ -15,7 +15,7 @@ const renderMarkdown = (text: string) => {
     // Italic text: *text* -> <em>text</em>
     .replace(/\*(.*?)\*/g, '<em>$1</em>')
     // Code blocks: ```code``` -> <code>code</code>
-    .replace(/```(.*?)```/gs, '<code class="bg-gray-100 px-2 py-1 rounded text-sm font-mono">$1</code>')
+    .replace(/```([\s\S]*?)```/g, '<code class="bg-gray-100 px-2 py-1 rounded text-sm font-mono">$1</code>')
     // Inline code: `code` -> <code>code</code>
     .replace(/`(.*?)`/g, '<code class="bg-gray-100 px-2 py-1 rounded text-sm font-mono">$1</code>')
     // Line breaks: \n -> <br>
@@ -27,7 +27,7 @@ const renderMarkdown = (text: string) => {
   
   // Wrap lists in <ul> tags
   if (formattedText.includes('<li>')) {
-    formattedText = formattedText.replace(/(<li>.*<\/li>)/gs, '<ul class="list-disc list-inside space-y-1 my-2">$1</ul>')
+    formattedText = formattedText.replace(/(<li>.*<\/li>)/g, '<ul class="list-disc list-inside space-y-1 my-2">$1</ul>')
   }
   
   return formattedText;

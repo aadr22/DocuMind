@@ -9,7 +9,7 @@ class PDFProcessor:
     
     def extract_text(self, pdf_path: str) -> str:
         """
-        Extract text from PDF file using PyPDF2
+        Extract text from PDF file using pdfplumber (primary) and PyPDF2 (fallback)
         
         Args:
             pdf_path: Path to the PDF file
@@ -17,6 +17,26 @@ class PDFProcessor:
         Returns:
             Extracted text as string
         """
+        # Try pdfplumber first (better text extraction)
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                text_content = []
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_content.append(page_text)
+                
+                full_text = '\n\n'.join(text_content)
+                if full_text.strip():
+                    return full_text
+                    
+        except ImportError:
+            print("pdfplumber not available, falling back to PyPDF2")
+        except Exception as e:
+            print(f"pdfplumber extraction failed: {e}, trying PyPDF2 fallback")
+        
+        # Fallback to PyPDF2
         try:
             with open(pdf_path, 'rb') as file:
                 # Create PDF reader object

@@ -8,14 +8,18 @@ import shutil
 from typing import Optional
 import logging
 import asyncio
+from datetime import timedelta
+from dotenv import load_dotenv
 
-# Import our custom models
-from models.cv_model import DocumentDetector
-from models.enhanced_vision_model import EnhancedVisionModel
-from models.llm_model import LLMProcessor
-from models.pdf_model import PDFProcessor
+# Load environment variables
+load_dotenv('env.local')
 
-# Import Firebase storage utility
+# Import our new services
+from services.model_manager import ModelManager
+from services.file_validation_service import FileValidationService
+from services.document_processing_service import DocumentProcessingService
+
+# Import Firebase storage utility (storage functionality disabled)
 from utils.firebase_storage import FirebaseStorageManager
 
 # Import real-time processor
@@ -24,8 +28,6 @@ from utils.realtime_processor import realtime_processor
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -43,30 +45,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize models
+# Initialize services using dependency injection
 try:
-    document_detector = DocumentDetector()
-    text_extractor = EnhancedVisionModel() # Changed to EnhancedVisionModel
-    llm_processor = LLMProcessor()
-    pdf_processor = PDFProcessor() # Added PDFProcessor initialization
-    logger.info("All models initialized successfully")
-except Exception as e:
-    logger.error(f"Error initializing models: {e}")
-    document_detector = None
-    text_extractor = None
-    llm_processor = None
-    pdf_processor = None # Added PDFProcessor to None
+    # Initialize model manager
+    model_manager = ModelManager()
+    logger.info("Model manager initialized successfully")
+    
+    # Initialize file validation service
+    file_validation_service = FileValidationService()
+    logger.info("File validation service initialized successfully")
 
-# Initialize Firebase Storage
-try:
+    # Initialize Firebase Storage
     firebase_storage = FirebaseStorageManager()
     if firebase_storage.is_initialized():
         logger.info("Firebase Storage initialized successfully")
     else:
-        logger.warning("Firebase Storage initialization failed")
+        logger.warning("Firebase Storage not available - files will not be stored")
+    
+    # Initialize document processing service with dependencies
+    document_processing_service = DocumentProcessingService(
+        document_detector=model_manager.get_document_detector(),
+        text_extractor=model_manager.get_text_extractor(),
+        llm_processor=model_manager.get_llm_processor(),
+        pdf_processor=model_manager.get_pdf_processor(),
+        storage_manager=firebase_storage
+    )
+    logger.info("Document processing service initialized successfully")
+    
 except Exception as e:
-    logger.error(f"Error initializing Firebase Storage: {e}")
+    logger.error(f"Error initializing services: {e}")
+    model_manager = None
+    file_validation_service = None
     firebase_storage = None
+    document_processing_service = None
 
 # Pydantic models for request/response
 class QuestionRequest(BaseModel):
@@ -76,7 +87,7 @@ class QuestionRequest(BaseModel):
 class ProcessDocumentResponse(BaseModel):
     extracted_text: str
     summary: str
-    file_url: str
+    file_url: str = ""  # File storage disabled
     success: bool
     message: str
     process_id: str = ""
@@ -92,146 +103,61 @@ class QuestionResponse(BaseModel):
 @app.get("/")
 async def root():
     """Health check endpoint"""
+    if not model_manager:
+        return {
+            "message": "DocuMind AI API is running but services not initialized",
+            "status": "degraded",
+            "models_loaded": False
+        }
+    
     return {
         "message": "DocuMind AI API is running",
-        "status": "healthy",
-        "models_loaded": all([document_detector, text_extractor, llm_processor])
+        "status": "healthy" if model_manager.are_all_models_loaded() else "degraded",
+        "models_loaded": model_manager.are_all_models_loaded()
     }
 
-
-async def process_document_background(process_id: str, file_content: bytes, filename: str):
+async def process_document_background(process_id: str, file_content: bytes, filename: str, user_id: str = "anonymous"):
     """Background task to process document asynchronously"""
-    temp_file_path = None
-    cropped_file_path = None
+    if not document_processing_service:
+        realtime_processor.add_error(process_id, "Document processing service not available")
+        return
     
     try:
-        # Check if Firebase Storage is available
-        if not firebase_storage or not firebase_storage.is_initialized():
-            logger.warning("Firebase Storage not available, proceeding without file upload")
-        
-        # Validate file type
-        allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png'}
-        file_ext = os.path.splitext(filename.lower())[1]
-        
-        if file_ext not in allowed_extensions:
-            realtime_processor.add_error(process_id, f"Unsupported file type: {file_ext}")
-            return
-        
-        # Update progress - File validation
-        realtime_processor.update_progress(process_id, 10, "Validating file format...")
-        await asyncio.sleep(0.5)  # Simulate processing time
-        
-        # Save uploaded file to temporary location
-        temp_file_path = tempfile.mktemp(suffix=file_ext)
-        with open(temp_file_path, "wb") as buffer:
-            buffer.write(file_content)
-        
-        logger.info(f"File saved to temporary location: {temp_file_path}")
-        realtime_processor.update_progress(process_id, 20, "File validation completed")
-        
-        # For image files, optionally detect and crop document
-        if file_ext in {'.jpg', '.jpeg', '.png'}:
-            try:
-                realtime_processor.update_progress(process_id, 30, "Detecting document boundaries...")
-                cropped_file_path = document_detector.detect_document(temp_file_path)
-                if cropped_file_path:
-                    logger.info("Document detected and cropped successfully")
-                    processing_path = cropped_file_path
-                    realtime_processor.update_progress(process_id, 40, "Document detection completed")
-                else:
-                    logger.info("Document detection failed, using original image")
-                    processing_path = temp_file_path
-                    realtime_processor.add_warning(process_id, "Document detection failed, using original image")
-            except Exception as e:
-                logger.warning(f"Document detection failed: {e}, using original image")
-                processing_path = temp_file_path
-                realtime_processor.add_warning(process_id, f"Document detection error: {str(e)}")
-        else:
-            # For PDFs, use original file (OCR will handle PDF processing)
-            processing_path = temp_file_path
-            realtime_processor.update_progress(process_id, 40, "PDF file ready for processing")
-        
-        # Extract text using appropriate processor
-        if file_ext == '.pdf':
-            # Use PDF processor for PDF files
-            realtime_processor.update_progress(process_id, 60, "Extracting text from PDF...")
-            extracted_text = pdf_processor.extract_text(processing_path)
-            realtime_processor.update_progress(process_id, 70, "PDF text extraction completed")
-        else:
-            # Use enhanced vision model for image files
-            realtime_processor.update_progress(process_id, 50, "Extracting text from image...")
-            vision_result = text_extractor.extract_text_from_image(processing_path)
-            extracted_text = vision_result['text']
-            realtime_processor.update_progress(process_id, 60, "Image text extraction completed")
+        # Validate file first
+        temp_file_path = None
+        try:
+            # Save uploaded file to temporary location for validation
+            file_ext = os.path.splitext(filename.lower())[1]
+            temp_file_path = tempfile.mktemp(suffix=file_ext)
+            with open(temp_file_path, "wb") as buffer:
+                buffer.write(file_content)
             
-            # Log which method was used and what was extracted
-            if extracted_text:
-                logger.info(f"Image processed using {vision_result['method']} with confidence: {vision_result['confidence']:.2f}")
-                
-                # Log image description if available
-                if vision_result.get('image_description'):
-                    logger.info(f"Image description: {vision_result['image_description'][:200]}...")
-                
-                # Log text length
-                logger.info(f"Extracted text length: {len(extracted_text)} characters")
-            else:
-                logger.warning("No text extracted from image")
-                
-                # Even if no text, log the image description
-                if vision_result.get('image_description'):
-                    logger.info(f"Image description available: {vision_result['image_description'][:200]}...")
-                    # Use description as text if no OCR text was found
-                    extracted_text = f"Image Description: {vision_result['image_description']}"
-                    logger.info("Using image description as text content")
+            # Validate file
+            is_valid, error_message = file_validation_service.validate_file(
+                temp_file_path, filename, len(file_content)
+            )
+            
+            if not is_valid:
+                realtime_processor.add_error(process_id, error_message)
+                return
+            
+            realtime_processor.update_progress(process_id, 10, "File validation completed")
         
-        if not extracted_text or extracted_text.startswith("Error"):
-            realtime_processor.add_error(process_id, "Failed to extract text from document")
+        except Exception as e:
+            realtime_processor.add_error(process_id, f"File validation failed: {str(e)}")
             return
         
-        # Generate summary using LLM
-        realtime_processor.update_progress(process_id, 80, "Generating AI summary...")
-        summary = llm_processor.summarize_text(extracted_text)
+        # Process document using the service
+        # Use provided user_id from request
+        result = await document_processing_service.process_document(
+            process_id, file_content, filename, user_id
+        )
         
-        if summary.startswith("Error"):
-            realtime_processor.add_error(process_id, "Summary generation failed")
-            return
-        
-        realtime_processor.update_progress(process_id, 90, "AI summary completed")
-        
-        # Upload file to Firebase Storage
-        file_url = ""
-        if firebase_storage and firebase_storage.is_initialized():
-            try:
-                realtime_processor.update_progress(process_id, 95, "Uploading to cloud storage...")
-                # Upload the original file to Firebase Storage
-                file_url = firebase_storage.upload_file(
-                    file_path=temp_file_path,
-                    original_filename=filename,
-                    folder="documents"
-                )
-                if not file_url:
-                    logger.warning("Failed to upload file to Firebase Storage")
-                    file_url = ""
-            except Exception as e:
-                logger.error(f"Error uploading file to Firebase Storage: {e}")
-                file_url = ""
+        # Update real-time processor with result
+        if result.get('success'):
+            realtime_processor.complete_process(process_id, result)
         else:
-            logger.info("Firebase Storage not available, skipping file upload")
-        
-        # Complete the process
-        result = {
-            "extracted_text": extracted_text,
-            "summary": summary,
-            "file_url": file_url,
-            "success": True,
-            "message": "Document processed successfully",
-            "process_id": process_id,
-            "image_description": vision_result.get('image_description', '') if file_ext != '.pdf' else '',
-            "processing_method": vision_result.get('method', '') if file_ext != '.pdf' else 'pdf_processor',
-            "confidence": vision_result.get('confidence', 0.0) if file_ext != '.pdf' else 1.0
-        }
-        
-        realtime_processor.complete_process(process_id, result)
+            realtime_processor.add_error(process_id, result.get('message', 'Processing failed'))
         
     except Exception as e:
         logger.error(f"Error processing document: {e}")
@@ -239,20 +165,27 @@ async def process_document_background(process_id: str, file_content: bytes, file
     
     finally:
         # Clean up temporary files
-        temp_files_to_clean = [temp_file_path, cropped_file_path]
-        temp_files_to_clean = [f for f in temp_files_to_clean if f and os.path.exists(f)]
-        
-        if temp_files_to_clean:
-            document_detector.cleanup_temp_files(temp_files_to_clean)
-            logger.info("Temporary files cleaned up")
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                logger.info("Temporary files cleaned up")
+            except Exception as e:
+                logger.warning(f"Error cleaning up temporary files: {e}")
 
 @app.post("/process-document", response_model=ProcessDocumentResponse)
-async def process_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def process_document(
+    background_tasks: BackgroundTasks, 
+    file: UploadFile = File(...),
+    user_id: str = Form(default="anonymous")
+):
     """
     Process uploaded document (PDF/JPG/PNG) to extract text and generate summary
     """
-    if not all([document_detector, text_extractor, llm_processor]):
-        raise HTTPException(status_code=500, detail="One or more models not initialized")
+    if not document_processing_service:
+        raise HTTPException(status_code=500, detail="Document processing service not initialized")
+    
+    # Log the received user_id for debugging
+    logger.info(f"Processing document for user_id: {user_id}")
     
     # Create real-time process tracking
     process_id = realtime_processor.create_process(file.filename, file.size)
@@ -260,12 +193,13 @@ async def process_document(background_tasks: BackgroundTasks, file: UploadFile =
     # Read file content
     file_content = await file.read()
     
-    # Add background task for processing
+    # Add background task for processing with user_id
     background_tasks.add_task(
         process_document_background, 
         process_id, 
         file_content, 
-        file.filename
+        file.filename,
+        user_id
     )
     
     # Return process ID immediately for real-time tracking
@@ -283,7 +217,7 @@ async def ask_question(request: QuestionRequest):
     """
     Ask a question about extracted text and get AI-generated answer
     """
-    if not llm_processor:
+    if not model_manager or not model_manager.get_llm_processor():
         raise HTTPException(status_code=500, detail="LLM model not initialized")
     
     try:
@@ -295,6 +229,7 @@ async def ask_question(request: QuestionRequest):
             raise HTTPException(status_code=400, detail="Extracted text cannot be empty")
         
         # Generate answer using LLM
+        llm_processor = model_manager.get_llm_processor()
         answer = llm_processor.answer_question(
             question=request.question,
             context=request.extracted_text
@@ -320,16 +255,30 @@ async def ask_question(request: QuestionRequest):
 @app.get("/health")
 async def health_check():
     """Detailed health check endpoint"""
-    model_status = {
-        "document_detector": document_detector is not None,
-        "text_extractor": text_extractor is not None,
-        "llm_processor": llm_processor is not None
-    }
+    if not model_manager:
+        return {
+            "status": "unhealthy",
+            "models": {},
+            "firebase_storage": firebase_storage.is_initialized() if firebase_storage else False,
+            "services": {
+                "model_manager": False,
+                "file_validation_service": False,
+                "document_processing_service": False
+            },
+            "timestamp": "2024-01-01T00:00:00Z"
+        }
+    
+    model_status = model_manager.get_model_status()
     
     return {
         "status": "healthy" if all(model_status.values()) else "degraded",
         "models": model_status,
         "firebase_storage": firebase_storage.is_initialized() if firebase_storage else False,
+        "services": {
+            "model_manager": model_manager is not None,
+            "file_validation_service": file_validation_service is not None,
+            "document_processing_service": document_processing_service is not None
+        },
         "timestamp": "2024-01-01T00:00:00Z"  # You can add actual timestamp logic
     }
 
@@ -348,6 +297,137 @@ async def get_active_processes():
         "active_count": len(realtime_processor.get_all_processes()),
         "processes": realtime_processor.get_all_processes()
     }
+
+@app.get("/supported-formats")
+async def get_supported_formats():
+    """Get supported file formats and size limits"""
+    if not file_validation_service:
+        raise HTTPException(status_code=500, detail="File validation service not initialized")
+    
+    return {
+        "supported_extensions": file_validation_service.get_supported_extensions(),
+        "max_file_size_bytes": file_validation_service.get_max_file_size(),
+        "max_file_size_mb": file_validation_service.get_max_file_size_mb()
+    }
+
+@app.delete("/documents/{document_path:path}")
+async def delete_document(document_path: str):
+    """Delete a document from Firebase Storage"""
+    if not firebase_storage or not firebase_storage.is_initialized():
+        raise HTTPException(status_code=503, detail="Firebase Storage not available")
+    
+    try:
+        # Get the blob
+        bucket = firebase_storage.bucket
+        blob = bucket.blob(document_path)
+        
+        # Check if blob exists
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Delete the blob
+        blob.delete()
+        
+        logger.info(f"Document deleted: {document_path}")
+        
+        return {
+            "success": True,
+            "message": "Document deleted successfully",
+            "document_path": document_path
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting document {document_path}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
+
+@app.get("/documents/{user_id}")
+async def get_user_documents(user_id: str):
+    """Get all documents for a user from Firebase Storage"""
+    if not firebase_storage or not firebase_storage.is_initialized():
+        raise HTTPException(status_code=503, detail="Firebase Storage not available")
+    
+    try:
+        # List all documents for the user
+        documents = []
+        bucket = firebase_storage.bucket
+        prefix = f"documents/{user_id}/"
+        
+        blobs = bucket.list_blobs(prefix=prefix)
+        for blob in blobs:
+            # Skip directories and get file info
+            if not blob.name.endswith('/'):
+                # Generate a signed URL for viewing/download (with inline content disposition)
+                # Use response_disposition='inline' for viewable files
+                file_ext = os.path.splitext(blob.name)[1].lower()
+                viewable_extensions = ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.txt']
+                
+                if file_ext in viewable_extensions:
+                    # Generate URL for inline viewing
+                    download_url = blob.generate_signed_url(
+                        version="v4", 
+                        expiration=timedelta(days=7), 
+                        method="GET",
+                        response_disposition='inline'
+                    )
+                else:
+                    # Generate URL for download
+                    download_url = blob.generate_signed_url(
+                        version="v4", 
+                        expiration=timedelta(days=7), 
+                        method="GET"
+                    )
+                
+                # Extract file info from the blob name
+                file_parts = blob.name.split('/')
+                filename = file_parts[-1]
+                
+                # Remove timestamp suffix if present
+                if '_' in filename and len(filename.split('_')[-1]) == 14:  # YYYYMMDDHHMMSS format
+                    original_name = '_'.join(filename.split('_')[:-1]) + '.' + filename.split('.')[-1]
+                else:
+                    original_name = filename
+                
+                documents.append({
+                    "id": blob.name,
+                    "fileName": filename,
+                    "originalName": original_name,
+                    "fileSize": blob.size,
+                    "fileType": filename.split('.')[-1] if '.' in filename else '',
+                    "mimeType": blob.content_type or 'application/octet-stream',
+                    "storagePath": blob.name,
+                    "downloadURL": download_url,
+                    "uploadedAt": blob.time_created.isoformat() if blob.time_created else None,
+                    "lastModified": blob.updated.isoformat() if blob.updated else None,
+                    "category": "General",
+                    "processingStatus": "completed",
+                    "aiAnalysis": {
+                        "summary": "Document processed successfully",
+                        "keywords": ["processed", "documind"],
+                        "sentiment": "neutral",
+                        "confidence": 0.9
+                    }
+                })
+        
+        return {
+            "documents": documents,
+            "total": len(documents),
+            "user_id": user_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching documents for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
+
+@app.get("/ocr-status")
+async def get_ocr_status():
+    """Get status of OCR engines"""
+    if not model_manager or not model_manager.get_text_extractor():
+        return {"ocr_engines": {}, "status": "not_available"}
+    
+    # This would need to be updated in the EnhancedVisionModel to use the new OCR strategies
+    return {"ocr_engines": {"status": "legacy_implementation"}, "note": "Update to use new OCR strategies"}
 
 # Error handlers
 @app.exception_handler(HTTPException)

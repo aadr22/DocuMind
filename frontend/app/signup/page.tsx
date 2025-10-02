@@ -2,11 +2,11 @@
 
 import React from 'react'
 import { useRouter } from 'next/navigation'
-import { Brain, ArrowRight } from 'lucide-react'
-import LoginForm from '@/components/auth/LoginForm'
+import { Brain, ArrowLeft } from 'lucide-react'
+import SignupForm from '@/components/auth/SignupForm'
 import Link from 'next/link'
 
-export default function LoginPage() {
+export default function SignupPage() {
   const router = useRouter()
 
   return (
@@ -21,23 +21,23 @@ export default function LoginPage() {
             DocuMind AI
           </h1>
           <p className="text-slate-600 font-medium">
-            Sign in to your account
+            Create your account to get started
           </p>
         </div>
 
-        {/* Login Form */}
+        {/* Signup Form */}
         <div className="glass-card">
-          <LoginForm />
+          <SignupForm />
         </div>
 
         {/* Navigation */}
         <div className="text-center">
           <Link 
-            href="/signup"
+            href="/login"
             className="inline-flex items-center text-sm text-slate-600 hover:text-slate-800 transition-colors"
           >
-            Don't have an account? Sign up
-            <ArrowRight className="h-4 w-4 ml-2" />
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Already have an account? Sign in
           </Link>
         </div>
 

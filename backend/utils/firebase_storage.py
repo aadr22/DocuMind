@@ -1,226 +1,328 @@
+"""
+Optimized Firebase Storage Manager
+Efficient file storage with 10MB limit, compression, and smart organization
+"""
+import os
+import io
+import gzip
+import logging
+from typing import Optional, Dict, Any, Tuple
+from datetime import datetime, timedelta
 import firebase_admin
 from firebase_admin import credentials, storage
-import os
-import json
-import tempfile
-from typing import Optional
-import logging
-from datetime import datetime
-import uuid
+from google.cloud import storage as gcs
+from google.cloud.exceptions import NotFound
+import mimetypes
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv('env.local')
+load_dotenv()  # Also try loading from current directory
 
 logger = logging.getLogger(__name__)
 
 class FirebaseStorageManager:
-    def __init__(self):
-        """Initialize Firebase Admin SDK with service account"""
-        self.bucket = None
-        self._initialize_firebase()
+    """Optimized Firebase Storage Manager with efficient file handling"""
     
-    def _initialize_firebase(self):
-        """Initialize Firebase Admin SDK"""
+    def __init__(self):
+        self.bucket = None
+        self.is_initialized_flag = False
+        self.max_file_size = 10 * 1024 * 1024  # 10MB limit
+        self.compression_threshold = 1024 * 1024  # 1MB - compress files larger than this
+        
         try:
-            # Get service account JSON from environment variable
-            service_account_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
-            if not service_account_json:
-                logger.warning("FIREBASE_SERVICE_ACCOUNT_JSON not found in environment variables")
-                return
-            
-            # Parse the JSON string
-            service_account_info = json.loads(service_account_json)
-            
-            # Get bucket name from environment or use default
-            bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
-            if not bucket_name:
-                # Try to extract from service account
-                project_id = service_account_info.get('project_id')
-                if project_id:
-                    bucket_name = f"{project_id}.appspot.com"
+            # Initialize Firebase Admin SDK
+            if not firebase_admin._apps:
+                # Try to get service account from environment
+                service_account_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
+                
+                if service_account_json and len(service_account_json) > 100:
+                    try:
+                        import json
+                        cred_dict = json.loads(service_account_json)
+                        cred = credentials.Certificate(cred_dict)
+                        firebase_admin.initialize_app(cred)
+                        logger.info("Firebase Admin SDK initialized with service account")
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize with service account: {e}")
+                        # Try default credentials
+                        try:
+                            firebase_admin.initialize_app()
+                            logger.info("Firebase Admin SDK initialized with default credentials")
+                        except Exception as e2:
+                            logger.warning(f"Failed to initialize with default credentials: {e2}")
+                            raise e2
                 else:
-                    logger.error("Could not determine Firebase Storage bucket name")
+                    logger.warning("No valid Firebase service account found, storage will be disabled")
                     return
             
-            # Initialize Firebase Admin SDK if not already initialized
-            if not firebase_admin._apps:
-                cred = credentials.Certificate(service_account_info)
-                firebase_admin.initialize_app(cred, {
-                    'storageBucket': bucket_name
-                })
-                logger.info(f"Firebase Admin SDK initialized with bucket: {bucket_name}")
-            
-            # Get storage bucket
-            self.bucket = storage.bucket()
-            logger.info("Firebase Storage bucket initialized successfully")
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in FIREBASE_SERVICE_ACCOUNT_JSON: {e}")
-        except Exception as e:
-            logger.error(f"Error initializing Firebase Storage: {e}")
-    
-    def upload_file(self, file_path: str, original_filename: str, folder: str = "documents") -> Optional[str]:
-        """
-        Upload a file to Firebase Storage
-        
-        Args:
-            file_path: Local path to the file to upload
-            original_filename: Original filename to preserve
-            folder: Folder path in Firebase Storage (default: "documents")
-            
-        Returns:
-            Public URL of the uploaded file or None if upload fails
-        """
-        if not self.bucket:
-            logger.error("Firebase Storage not initialized")
-            return None
-        
-        try:
-            # Generate unique filename to avoid conflicts
-            file_extension = os.path.splitext(original_filename)[1]
-            unique_filename = f"{uuid.uuid4().hex}{file_extension}"
-            
-            # Create storage path
-            timestamp = datetime.now().strftime("%Y/%m/%d")
-            storage_path = f"{folder}/{timestamp}/{unique_filename}"
-            
-            # Create blob and upload file
-            blob = self.bucket.blob(storage_path)
-            
-            # Set metadata
-            blob.metadata = {
-                'original_filename': original_filename,
-                'upload_timestamp': datetime.now().isoformat(),
-                'content_type': self._get_content_type(file_extension)
-            }
-            
-            # Upload the file
-            blob.upload_from_filename(file_path)
-            
-            # Make the blob publicly readable
-            blob.make_public()
-            
-            # Get public URL
-            public_url = blob.public_url
-            
-            logger.info(f"File uploaded successfully to Firebase Storage: {storage_path}")
-            logger.info(f"Public URL: {public_url}")
-            
-            return public_url
+            # Initialize Cloud Storage client
+            self.bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
+            if not self.bucket_name:
+                logger.warning("FIREBASE_STORAGE_BUCKET not set, storage will be disabled")
+                return
+                
+            # Use the same credentials as Firebase Admin SDK
+            from google.oauth2 import service_account
+            import json
+            cred_dict = json.loads(service_account_json)
+            gcs_credentials = service_account.Credentials.from_service_account_info(cred_dict)
+            self.bucket = gcs.Client(credentials=gcs_credentials).bucket(self.bucket_name)
+            self.is_initialized_flag = True
+            logger.info(f"Firebase Storage Manager initialized with bucket: {self.bucket_name}")
             
         except Exception as e:
-            logger.error(f"Error uploading file to Firebase Storage: {e}")
-            return None
+            logger.warning(f"Firebase Storage not available: {e}")
+            self.is_initialized_flag = False
     
-    def upload_file_from_bytes(self, file_bytes: bytes, original_filename: str, folder: str = "documents") -> Optional[str]:
+    def is_initialized(self) -> bool:
+        """Check if storage is properly initialized"""
+        return self.is_initialized_flag and self.bucket is not None
+    
+    def _generate_file_path(self, user_id: str, original_filename: str, folder: str = "documents") -> str:
+        """Generate organized file path: folder/user_id/year/month/filename"""
+        now = datetime.now()
+        file_ext = os.path.splitext(original_filename)[1]
+        base_name = os.path.splitext(original_filename)[0]
+        
+        # Sanitize filename
+        safe_filename = "".join(c for c in base_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_filename = safe_filename.replace(' ', '_')
+        
+        # Add timestamp to avoid conflicts
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_filename}_{timestamp}{file_ext}"
+        
+        return f"{folder}/{user_id}/{now.year}/{now.month:02d}/{filename}"
+    
+    def _compress_file(self, file_bytes: bytes, filename: str) -> Tuple[bytes, bool]:
+        """Compress file if it's larger than threshold and appropriate file type"""
+        # Don't compress files that should be viewable in browser (PDFs, images)
+        file_ext = os.path.splitext(filename)[1].lower()
+        viewable_extensions = ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.txt', '.json']
+        
+        if file_ext in viewable_extensions:
+            # Don't compress viewable files
+            return file_bytes, False
+        
+        if len(file_bytes) > self.compression_threshold:
+            try:
+                compressed = gzip.compress(file_bytes)
+                # Only use compression if it actually reduces size
+                if len(compressed) < len(file_bytes):
+                    return compressed, True
+            except Exception as e:
+                logger.warning(f"Compression failed: {e}")
+        
+        return file_bytes, False
+    
+    def _get_content_type(self, filename: str) -> str:
+        """Get content type for file"""
+        content_type, _ = mimetypes.guess_type(filename)
+        return content_type or 'application/octet-stream'
+    
+    def upload_file_from_bytes(
+        self, 
+        file_bytes: bytes, 
+        original_filename: str, 
+        user_id: str,
+        folder: str = "documents"
+    ) -> Optional[Dict[str, Any]]:
         """
-        Upload file bytes to Firebase Storage
+        Upload file from bytes with optimization
         
         Args:
             file_bytes: File content as bytes
-            original_filename: Original filename to preserve
-            folder: Folder path in Firebase Storage (default: "documents")
+            original_filename: Original filename
+            user_id: User ID for organization
+            folder: Storage folder
             
         Returns:
-            Public URL of the uploaded file or None if upload fails
+            Dict with file info or None if failed
         """
-        if not self.bucket:
+        if not self.is_initialized():
             logger.error("Firebase Storage not initialized")
             return None
         
+        # Check file size
+        if len(file_bytes) > self.max_file_size:
+            logger.error(f"File too large: {len(file_bytes)} bytes (max: {self.max_file_size})")
+            return None
+        
         try:
-            # Generate unique filename
-            file_extension = os.path.splitext(original_filename)[1]
-            unique_filename = f"{uuid.uuid4().hex}{file_extension}"
+            # Generate file path
+            file_path = self._generate_file_path(user_id, original_filename, folder)
             
-            # Create storage path
-            timestamp = datetime.now().strftime("%Y/%m/%d")
-            storage_path = f"{folder}/{timestamp}/{unique_filename}"
+            # Compress if beneficial (but not for viewable files)
+            compressed_bytes, is_compressed = self._compress_file(file_bytes, original_filename)
             
-            # Create blob and upload bytes
-            blob = self.bucket.blob(storage_path)
+            # Get content type
+            content_type = self._get_content_type(original_filename)
+            if is_compressed:
+                content_type = 'application/gzip'
+            
+            # Create blob
+            blob = self.bucket.blob(file_path)
             
             # Set metadata
             blob.metadata = {
                 'original_filename': original_filename,
-                'upload_timestamp': datetime.now().isoformat(),
-                'content_type': self._get_content_type(file_extension)
+                'user_id': user_id,
+                'uploaded_at': datetime.now().isoformat(),
+                'compressed': str(is_compressed),
+                'original_size': str(len(file_bytes)),
+                'stored_size': str(len(compressed_bytes))
             }
             
-            # Upload the bytes
-            blob.upload_from_string(file_bytes, content_type=self._get_content_type(file_extension))
+            # Set proper cache control for viewable files
+            cache_control = 'public, max-age=3600' if not is_compressed else 'private, max-age=300'
             
-            # Make the blob publicly readable
+            # Upload file
+            blob.upload_from_string(
+                compressed_bytes,
+                content_type=content_type
+            )
+            
+            # Set cache control after upload
+            blob.cache_control = cache_control
+            blob.patch()
+            
+            # Make file publicly readable (or use signed URLs for security)
             blob.make_public()
             
-            # Get public URL
-            public_url = blob.public_url
+            # Generate download URL
+            download_url = blob.public_url
             
-            logger.info(f"File bytes uploaded successfully to Firebase Storage: {storage_path}")
-            logger.info(f"Public URL: {public_url}")
+            logger.info(f"File uploaded successfully: {file_path}")
             
-            return public_url
+            return {
+                'file_path': file_path,
+                'download_url': download_url,
+                'original_filename': original_filename,
+                'file_size': len(file_bytes),
+                'stored_size': len(compressed_bytes),
+                'compressed': is_compressed,
+                'content_type': content_type,
+                'uploaded_at': datetime.now().isoformat()
+            }
             
         except Exception as e:
-            logger.error(f"Error uploading file bytes to Firebase Storage: {e}")
-            return None
+            logger.error(f"Failed to upload file: {e}")
+        return None
     
-    def delete_file(self, file_url: str) -> bool:
-        """
-        Delete a file from Firebase Storage
-        
-        Args:
-            file_url: Public URL of the file to delete
-            
-        Returns:
-            True if deletion successful, False otherwise
-        """
-        if not self.bucket:
+    def upload_file(self, file_path: str, original_filename: str, user_id: str, folder: str = "documents"):
+        """Upload file from local path"""
+        try:
+            with open(file_path, 'rb') as f:
+                file_bytes = f.read()
+            return self.upload_file_from_bytes(file_bytes, original_filename, user_id, folder)
+        except Exception as e:
+            logger.error(f"Failed to read file {file_path}: {e}")
+        return None
+    
+    def delete_file(self, file_path: str) -> bool:
+        """Delete file from storage"""
+        if not self.is_initialized():
             logger.error("Firebase Storage not initialized")
             return False
         
         try:
-            # Extract blob name from URL
-            # URL format: https://storage.googleapis.com/BUCKET_NAME/path/to/file
-            url_parts = file_url.split('/')
-            if len(url_parts) < 5:
-                logger.error(f"Invalid Firebase Storage URL format: {file_url}")
-                return False
-            
-            # Get the path after bucket name
-            bucket_name = url_parts[3]
-            blob_path = '/'.join(url_parts[4:])
-            
-            # Get blob and delete
-            blob = self.bucket.blob(blob_path)
+            blob = self.bucket.blob(file_path)
             blob.delete()
-            
-            logger.info(f"File deleted successfully from Firebase Storage: {blob_path}")
+            logger.info(f"File deleted successfully: {file_path}")
             return True
-            
-        except Exception as e:
-            logger.error(f"Error deleting file from Firebase Storage: {e}")
+        except NotFound:
+            logger.warning(f"File not found: {file_path}")
             return False
+        except Exception as e:
+            logger.error(f"Failed to delete file {file_path}: {e}")
+        return False
     
-    def _get_content_type(self, file_extension: str) -> str:
-        """
-        Get MIME content type based on file extension
+    def get_file_info(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """Get file information"""
+        if not self.is_initialized():
+            return None
         
-        Args:
-            file_extension: File extension (e.g., '.pdf', '.jpg')
+        try:
+            blob = self.bucket.blob(file_path)
+            blob.reload()
             
-        Returns:
-            MIME content type string
-        """
-        content_types = {
-            '.pdf': 'application/pdf',
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.png': 'image/png',
-            '.bmp': 'image/bmp',
-            '.tiff': 'image/tiff',
-            '.tif': 'image/tiff'
-        }
-        
-        return content_types.get(file_extension.lower(), 'application/octet-stream')
+            return {
+                'file_path': file_path,
+                'size': blob.size,
+                'content_type': blob.content_type,
+                'created': blob.time_created.isoformat() if blob.time_created else None,
+                'updated': blob.updated.isoformat() if blob.updated else None,
+                'metadata': blob.metadata or {}
+            }
+        except NotFound:
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get file info for {file_path}: {e}")
+            return None
     
-    def is_initialized(self) -> bool:
-        """Check if Firebase Storage is properly initialized"""
-        return self.bucket is not None
+    def generate_signed_url(self, file_path: str, expiration_hours: int = 24) -> Optional[str]:
+        """Generate signed URL for secure file access"""
+        if not self.is_initialized():
+            return None
+        
+        try:
+            blob = self.bucket.blob(file_path)
+            expiration = datetime.now() + timedelta(hours=expiration_hours)
+            
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=expiration,
+                method="GET"
+            )
+            return url
+        except Exception as e:
+            logger.error(f"Failed to generate signed URL for {file_path}: {e}")
+        return None
+
+    def list_user_files(self, user_id: str, folder: str = "documents") -> list:
+        """List all files for a user"""
+        if not self.is_initialized():
+            return []
+        
+        try:
+            prefix = f"{folder}/{user_id}/"
+            blobs = self.bucket.list_blobs(prefix=prefix)
+            
+            files = []
+            for blob in blobs:
+                files.append({
+                    'file_path': blob.name,
+                    'size': blob.size,
+                    'content_type': blob.content_type,
+                    'created': blob.time_created.isoformat() if blob.time_created else None,
+                    'metadata': blob.metadata or {}
+                })
+            
+            return files
+        except Exception as e:
+            logger.error(f"Failed to list files for user {user_id}: {e}")
+            return []
+    
+    def cleanup_old_files(self, user_id: str, days_old: int = 30, folder: str = "documents") -> int:
+        """Clean up files older than specified days"""
+        if not self.is_initialized():
+            return 0
+        
+        try:
+            cutoff_date = datetime.now() - timedelta(days=days_old)
+            prefix = f"{folder}/{user_id}/"
+            blobs = self.bucket.list_blobs(prefix=prefix)
+            
+            deleted_count = 0
+            for blob in blobs:
+                if blob.time_created and blob.time_created.replace(tzinfo=None) < cutoff_date:
+                    blob.delete()
+                    deleted_count += 1
+                    logger.info(f"Deleted old file: {blob.name}")
+            
+            logger.info(f"Cleaned up {deleted_count} old files for user {user_id}")
+            return deleted_count
+        except Exception as e:
+            logger.error(f"Failed to cleanup old files for user {user_id}: {e}")
+            return 0

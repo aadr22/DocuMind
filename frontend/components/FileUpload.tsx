@@ -1,13 +1,16 @@
 'use client'
 
 import React, { useState, useCallback } from 'react'
-import { Upload, File, X, Loader2 } from 'lucide-react'
+import { Upload, File, X, Loader2, AlertCircle } from 'lucide-react'
 import { cn } from '@/utils/cn'
+import { useAuth } from '@/contexts/AuthContext'
+import documentService, { DocumentMetadata, UploadProgress } from '@/utils/documentService'
+import { toast } from '@/utils/toast'
 
 interface ProcessedDocument {
   extracted_text: string
   summary: string
-  file_url: string
+  file_url: string  // Will always be empty - storage disabled
   success: boolean
   message: string
 }
@@ -17,20 +20,24 @@ interface FileUploadProps {
   onFileUpload: (file: File, document: ProcessedDocument) => void
   onProcessingStart?: (processId: string) => void
   acceptedTypes?: string[]
+  onDocumentUploaded?: (document: DocumentMetadata) => void
 }
 
 export default function FileUpload({ 
   onFileSelect, 
   onFileUpload, 
   onProcessingStart,
-  acceptedTypes = ['.pdf', '.jpg', '.jpeg', '.png']
+  acceptedTypes = ['.pdf', '.jpg', '.jpeg', '.png'],
+  onDocumentUploaded
 }: FileUploadProps) {
+  const { user } = useAuth()
   const [dragActive, setDragActive] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [isUploading, setIsUploading] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [processingStep, setProcessingStep] = useState('')
+  const [error, setError] = useState('')
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -78,103 +85,149 @@ export default function FileUpload({
   }
 
   const handleUpload = async () => {
+    if (!user) {
+      setError('Please sign in to upload documents')
+      toast.error('Please sign in to upload documents')
+      return
+    }
+
     if (selectedFile) {
       try {
         setIsUploading(true)
         setIsProcessing(true)
         setUploadProgress(0)
-        setProcessingStep('Uploading file...')
+        setProcessingStep('Preparing upload...')
+        setError('')
         
-        // Simulate continuous upload progress (0% → 100%)
-        const uploadInterval = setInterval(() => {
-          setUploadProgress(prev => {
-            if (prev >= 100) {
-              clearInterval(uploadInterval)
-              return 100
-            }
-            return prev + 10
-          })
-        }, 100)
-
-        // Send file to backend API with real upload progress
+        console.log('Starting upload for file:', selectedFile.name)
+        
+        // Create FormData for file upload
         const formData = new FormData()
         formData.append('file', selectedFile)
-
-        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_API_URL || 'http://localhost:8000'
+        formData.append('user_id', user.uid) // Add user ID to the request
         
-        // Use XMLHttpRequest for real upload progress
-        const response = await new Promise<{ ok: boolean; json: () => any }>((resolve, reject) => {
-          const xhr = new XMLHttpRequest()
-          
-          xhr.upload.addEventListener('progress', (event) => {
-            if (event.lengthComputable) {
-              const percentComplete = Math.round((event.loaded / event.total) * 100)
-              setUploadProgress(percentComplete)
-            }
-          })
-          
-          xhr.addEventListener('load', () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-              try {
-                const data = JSON.parse(xhr.responseText)
-                resolve({ ok: true, json: () => data })
-              } catch (e) {
-                reject(new Error('Invalid JSON response'))
-              }
-            } else {
-              reject(new Error(`HTTP error! status: ${xhr.status}`))
-            }
-          })
-          
-          xhr.addEventListener('error', () => reject(new Error('Network error')))
-          
-          xhr.open('POST', `${backendUrl}/process-document`)
-          xhr.send(formData)
+        console.log('Uploading with user_id:', user.uid) // Debug log
+        
+        setProcessingStep('Uploading document...')
+        setUploadProgress(10)
+        
+        // Call the backend API to process the document
+        const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_API_URL}/process-document`, {
+          method: 'POST',
+          body: formData,
         })
-
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: unknown`)
-        }
-
-        const data = response.json()
-        console.log('Backend response:', data) // Debug log
         
-        if (data.success) {
-          // Document processed immediately (rare case)
-          setUploadProgress(100)
-          setProcessingStep('Processing complete!')
-          setTimeout(() => {
-            onFileUpload(selectedFile, data)
-            setSelectedFile(null)
-            setUploadProgress(0)
-            setIsProcessing(false)
-            setProcessingStep('')
-          }, 1000)
-        } else if (data.process_id) {
-          // Real-time processing started
-          setUploadProgress(100)
-          setProcessingStep('Processing started - switching to real-time updates...')
-          
-          // Call the callback for real-time tracking
-          if (onProcessingStart) {
-            console.log('Calling onProcessingStart with:', data.process_id)
-            onProcessingStart(data.process_id)
-          }
-          
-          // Reset upload state but keep processing state
-          setIsUploading(false)
-        } else {
-          throw new Error(data.message || 'Failed to process document')
+        if (!response.ok) {
+          throw new Error(`Upload failed: ${response.statusText}`)
         }
+        
+        const result = await response.json()
+        console.log('Backend response:', result)
+        
+        if (!result.process_id) {
+          throw new Error('No process ID returned from backend')
+        }
+        
+        // Start polling for processing status
+        const processId = result.process_id
+        setProcessingStep('Processing document...')
+        setUploadProgress(25)
+        
+        // Poll for processing status
+        const pollStatus = async () => {
+          try {
+            const statusResponse = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_API_URL}/process-status/${processId}`)
+            if (!statusResponse.ok) {
+              throw new Error('Failed to get processing status')
+            }
+            
+            const status = await statusResponse.json()
+            console.log('Processing status:', status)
+            
+            // Update progress based on status
+            setUploadProgress(Math.min(status.progress || 0, 90))
+            setProcessingStep(status.current_step || 'Processing...')
+            
+            if (status.status === 'completed') {
+              setUploadProgress(100)
+              setProcessingStep('Document processed successfully!')
+              
+              // Create document metadata from the processed result
+              const document: DocumentMetadata = {
+                uid: user.uid,
+                fileName: selectedFile.name,
+                originalName: selectedFile.name,
+                fileSize: selectedFile.size,
+                fileType: selectedFile.name.split('.').pop() || '',
+                mimeType: selectedFile.type,
+                storagePath: '', // Storage disabled
+                uploadedAt: new Date(),
+                lastModified: new Date(selectedFile.lastModified),
+                category: 'General',
+                description: `Processed via DocuMind on ${new Date().toLocaleDateString()}`,
+                tags: ['processed', 'documind'],
+                processingStatus: 'completed',
+                aiAnalysis: {
+                  summary: status.result?.summary || 'AI summary generated',
+                  keywords: status.result?.keywords || ['processed', 'documind'],
+                  sentiment: 'neutral',
+                  confidence: 0.9
+                }
+              }
+              
+              console.log('Processing completed, document:', document)
+              
+              // Call the callback for document processed
+              if (onDocumentUploaded) {
+                onDocumentUploaded(document)
+              }
+              
+              // Call the file upload callback with the processed document
+              const processedDoc: ProcessedDocument = {
+                extracted_text: status.result?.extracted_text || '',
+                summary: status.result?.summary || '',
+                file_url: '',
+                success: true,
+                message: 'Document processed successfully'
+              }
+              
+              if (onFileUpload) {
+                onFileUpload(selectedFile, processedDoc)
+              }
+              
+              // Reset state after successful processing
+              setTimeout(() => {
+                setSelectedFile(null)
+                setUploadProgress(0)
+                setIsProcessing(false)
+                setProcessingStep('')
+                toast.success('Document processed successfully!')
+              }, 2000)
+              
+            } else if (status.status === 'error') {
+              throw new Error(status.errors?.[0] || 'Processing failed')
+            } else {
+              // Continue polling
+              setTimeout(pollStatus, 1000)
+            }
+            
+          } catch (error) {
+            console.error('Error polling status:', error)
+            throw error
+          }
+        }
+        
+        // Start polling
+        await pollStatus()
+
       } catch (error) {
         console.error('Upload failed:', error)
+        const errorMessage = error instanceof Error ? error.message : 'Upload failed. Please try again.'
+        setError(errorMessage)
         setUploadProgress(0)
         setIsProcessing(false)
         setProcessingStep('')
-        // Show error toast
-        import('@/utils/toast').then(({ toast }) => {
-          toast.error(error instanceof Error ? error.message : 'Upload failed. Please try again.')
-        })
+        toast.error(errorMessage)
       } finally {
         setIsUploading(false)
       }
@@ -224,6 +277,14 @@ export default function FileUpload({
         <p className="text-sm text-slate-400">
           Supported formats: {acceptedTypes.join(', ')}
         </p>
+        
+        {/* Error Display */}
+        {error && (
+          <div className="mt-4 p-3 bg-red-900/20 border border-red-500/30 rounded-lg flex items-center space-x-2">
+            <AlertCircle className="h-4 w-4 text-red-400" />
+            <span className="text-sm text-red-300">{error}</span>
+          </div>
+        )}
             <input
               type="file"
               accept={acceptedTypes.join(',')}
@@ -233,7 +294,7 @@ export default function FileUpload({
             />
                          <label
                htmlFor="file-upload"
-               className="inline-flex items-center px-6 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl hover:shadow-blue-500/25 transition-all duration-300 hover:scale-105 cursor-pointer border border-blue-500/30"
+               className="inline-flex items-center px-6 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl hover:shadow-blue-500/25 transition-all duration-300 hover:scale-105 cursor-pointer border border-blue-500/30 mt-4"
              >
                <Upload className="h-4 w-4 mr-2" />
                Choose File
